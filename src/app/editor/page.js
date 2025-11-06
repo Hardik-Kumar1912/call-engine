@@ -32,9 +32,21 @@ export default function EditorPage() {
   function addRow() {
     setRows((p) => [...p, { name: "", number: "" }]);
   }
-  function deleteRow(i) {
-    setRows((p) => p.filter((_, idx) => idx !== i));
+
+  // deleteRow with auto-save option (default: autosave enabled)
+  async function deleteRow(i, { autosave = true } = {}) {
+    // compute new rows first (avoid stale-state risks)
+    setRows((prev) => {
+      const newRows = prev.filter((_, idx) => idx !== i);
+      // Immediately persist in background (optimistic)
+      if (autosave) {
+        // call but don't await here to avoid blocking UI; handle errors inside helper
+        saveRowsToSheet(newRows);
+      }
+      return newRows;
+    });
   }
+
   function updateRow(i, field, value) {
     setRows((p) => {
       const copy = p.map((r) => ({ ...r }));
@@ -43,35 +55,57 @@ export default function EditorPage() {
       return copy;
     });
   }
+
   function clearSheet() {
     setRows([{ name: "", number: "" }]);
   }
 
-  async function saveToGoogleSheet() {
+  // Centralized save helper used by manual Save and auto-delete
+  async function saveRowsToSheet(rowsToSave) {
     setSaving(true);
     setMessage("Saving...");
     try {
       const res = await fetch("/api/update-sheet", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ rows: rowsToSave }),
       });
-      const j = await res.json();
+      const j = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(j.message || "Save failed");
 
       setMessage("Saved successfully");
 
-      // refresh from sheet
-      const r2 = await fetch("/api/get-sheet");
-      const d2 = await r2.json();
-      setRows(d2.rows || []);
+      // Optionally refresh canonical copy from server to ensure perfect sync
+      try {
+        const r2 = await fetch("/api/get-sheet");
+        const d2 = await r2.json();
+        setRows(d2.rows || []);
+      } catch (refreshErr) {
+        // If refresh fails, keep optimistic rows we saved earlier
+        console.warn("Refresh after save failed:", refreshErr);
+      }
     } catch (err) {
-      console.error(err);
+      console.error("Save error:", err);
       setMessage("Save failed");
+
+      // Basic rollback idea: you could reload server rows here to revert.
+      // For now we attempt to reload server rows so user isn't left in inconsistent state.
+      try {
+        const r3 = await fetch("/api/get-sheet");
+        const d3 = await r3.json();
+        setRows(d3.rows || []);
+      } catch (reloadErr) {
+        console.warn("Reload after save failure also failed:", reloadErr);
+      }
     } finally {
       setSaving(false);
       setTimeout(() => setMessage(""), 2500);
     }
+  }
+
+  // Manual save button handler (uses same helper)
+  async function saveToGoogleSheet() {
+    await saveRowsToSheet(rows);
   }
 
   async function handleRun() {
@@ -80,7 +114,7 @@ export default function EditorPage() {
     setMessage("Starting...");
     try {
       const res = await fetch("/api/make/run", { method: "POST" });
-      const j = await res.json();
+      const j = await res.json().catch(() => ({}));
       if (!res.ok) {
         setMessage("Run failed");
         console.error(j);
@@ -98,7 +132,6 @@ export default function EditorPage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-linear-to-br from-sky-50 via-white to-sky-100">
-
       {/* HEADER */}
       <header className="bg-white shadow sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex items-center justify-between">
@@ -171,6 +204,7 @@ export default function EditorPage() {
               </button>
               <button
                 onClick={saveToGoogleSheet}
+                disabled={saving}
                 className={`px-4 py-2 rounded-md text-sm text-white shadow ${
                   saving ? "bg-gray-400" : "bg-blue-600 hover:bg-blue-700"
                 }`}
@@ -179,6 +213,7 @@ export default function EditorPage() {
               </button>
               <button
                 onClick={handleRun}
+                disabled={running}
                 className={`px-4 py-2 rounded-md text-sm text-white shadow ${
                   running ? "bg-amber-300" : "bg-emerald-600 hover:bg-emerald-700"
                 }`}
@@ -226,7 +261,7 @@ export default function EditorPage() {
                         <td className="px-4 py-3">
                           <div className="flex gap-2">
                             <button
-                              onClick={() => deleteRow(i)}
+                              onClick={() => deleteRow(i)} // autosave by default
                               className="px-3 py-1 bg-red-50 text-red-700 rounded hover:bg-red-100"
                               aria-label={`Delete row ${i + 1}`}
                             >
@@ -338,6 +373,7 @@ export default function EditorPage() {
           </button>
           <button
             onClick={saveToGoogleSheet}
+            disabled={saving}
             className="flex-1 mx-1 px-3 py-2 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700"
             aria-label="Save"
           >
@@ -345,6 +381,7 @@ export default function EditorPage() {
           </button>
           <button
             onClick={handleRun}
+            disabled={running}
             className="flex-1 ml-1 px-3 py-2 rounded-md bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700"
             aria-label="Run"
           >

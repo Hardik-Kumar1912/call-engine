@@ -44,3 +44,7 @@ creds.b64
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+report_dir
+
+.VSCodeCounter
