@@ -42,25 +42,43 @@ export async function POST(req) {
     const sheets = google.sheets({ version: "v4", auth: client });
 
     const spreadsheetId = "1TWed-hSlL14Eh5iNHV5NzDbdhcCkleX4_ZC6PGzmYzI"; // your sheet ID
+    const MAX_ROW = 1000; // must match get-sheet range
+    const startRow = 2; // we write starting at A2
 
+    // Prepare values
     const values = rows.map((r) => [r.name ?? "", r.number ?? ""]);
 
-    // If you want to overwrite a fixed block:
+    // If no rows, clear entire A2:B{MAX_ROW} and return
+    if (values.length === 0) {
+      const clearRange = `Sheet1!A${startRow}:B${MAX_ROW}`;
+      await sheets.spreadsheets.values.clear({
+        spreadsheetId,
+        range: clearRange,
+      });
+      return NextResponse.json({ message: "✅ Google Sheet cleared successfully (no rows)." });
+    }
+
+    // Compute exact write range for current rows (A2:B{endRow})
+    const endRow = startRow - 1 + values.length; // if startRow=2 and values.length=1 => endRow=2
+    const writeRange = `Sheet1!A${startRow}:B${endRow}`;
+
+    // Update exact range with provided values
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: "Sheet1!A2:B1000",
+      range: writeRange,
       valueInputOption: "RAW",
       requestBody: { values },
     });
 
-    // If you'd prefer to replace only the rows length, you could compute range dynamically:
-    // const endRow = 1 + values.length; // since A2 is row 2
-    // await sheets.spreadsheets.values.update({
-    //   spreadsheetId,
-    //   range: `Sheet1!A2:B${endRow}`,
-    //   valueInputOption: "RAW",
-    //   requestBody: { values },
-    // });
+    // If there are leftover rows below endRow up to MAX_ROW, clear them
+    if (endRow < MAX_ROW) {
+      const clearStart = endRow + 1;
+      const clearRange = `Sheet1!A${clearStart}:B${MAX_ROW}`;
+      await sheets.spreadsheets.values.clear({
+        spreadsheetId,
+        range: clearRange,
+      });
+    }
 
     return NextResponse.json({ message: "✅ Google Sheet Updated Successfully!" });
   } catch (error) {
