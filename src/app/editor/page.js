@@ -33,18 +33,41 @@ export default function EditorPage() {
     setRows((p) => [...p, { name: "", number: "" }]);
   }
 
-  // deleteRow with auto-save option (default: autosave enabled)
-  async function deleteRow(i, { autosave = true } = {}) {
-    // compute new rows first (avoid stale-state risks)
-    setRows((prev) => {
-      const newRows = prev.filter((_, idx) => idx !== i);
-      // Immediately persist in background (optimistic)
-      if (autosave) {
-        // call but don't await here to avoid blocking UI; handle errors inside helper
-        saveRowsToSheet(newRows);
-      }
-      return newRows;
-    });
+  // DELETE with optimistic update + rollback on failure
+  async function deleteRow(i) {
+    // capture current rows for possible rollback
+    const prevRows = [...rows];
+    const newRows = prevRows.filter((_, idx) => idx !== i);
+
+    // optimistic UI update
+    setRows(newRows);
+
+    // try to persist; do NOT auto-refresh server data here (we'll handle success)
+    const result = await saveRowsToSheet(newRows, { refresh: false });
+
+    if (!result.success) {
+      // rollback if save failed
+      console.error("Delete/save failed:", result.error);
+      setRows(prevRows);
+      setMessage("Delete failed — changes not saved.");
+      setTimeout(() => setMessage(""), 3500);
+      return;
+    }
+
+    // success: optionally refresh canonical copy (safer if multiple writers)
+    // here we choose to refresh so UI is strictly synced with the sheet
+    try {
+      const r2 = await fetch("/api/get-sheet");
+      const d2 = await r2.json();
+      setRows(d2.rows || newRows);
+      setMessage("Deleted");
+      setTimeout(() => setMessage(""), 2200);
+    } catch (refreshErr) {
+      // if refresh fails, keep optimistic newRows (already saved successfully)
+      console.warn("Refresh after delete/save failed:", refreshErr);
+      setMessage("Deleted (couldn't refresh)");
+      setTimeout(() => setMessage(""), 2200);
+    }
   }
 
   function updateRow(i, field, value) {
@@ -60,8 +83,13 @@ export default function EditorPage() {
     setRows([{ name: "", number: "" }]);
   }
 
-  // Centralized save helper used by manual Save and auto-delete
-  async function saveRowsToSheet(rowsToSave) {
+  /**
+   * Centralized save helper.
+   * - rowsToSave: array to send to server.
+   * - options.refresh: whether to fetch the canonical copy after successful save (default true).
+   * Returns: { success: boolean, error?: Error, serverRows?: any }
+   */
+  async function saveRowsToSheet(rowsToSave, { refresh = true } = {}) {
     setSaving(true);
     setMessage("Saving...");
     try {
@@ -70,42 +98,55 @@ export default function EditorPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rows: rowsToSave }),
       });
+
       const j = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(j.message || "Save failed");
 
-      setMessage("Saved successfully");
+      if (!res.ok) {
+        const err = new Error(j.message || "Save failed");
+        // return a failure result instead of throwing so callers can rollback
+        return { success: false, error: err };
+      }
 
-      // Optionally refresh canonical copy from server to ensure perfect sync
-      try {
-        const r2 = await fetch("/api/get-sheet");
-        const d2 = await r2.json();
-        setRows(d2.rows || []);
-      } catch (refreshErr) {
-        // If refresh fails, keep optimistic rows we saved earlier
-        console.warn("Refresh after save failed:", refreshErr);
+      if (refresh) {
+        // refresh canonical copy
+        try {
+          const r2 = await fetch("/api/get-sheet");
+          const d2 = await r2.json();
+          setRows(d2.rows || rowsToSave);
+          setMessage("Saved successfully");
+          setTimeout(() => setMessage(""), 2500);
+          return { success: true, serverRows: d2.rows || rowsToSave };
+        } catch (refreshErr) {
+          // saved ok but failed to refresh — still success
+          console.warn("Saved but refresh failed:", refreshErr);
+          setMessage("Saved (refresh failed)");
+          setTimeout(() => setMessage(""), 2500);
+          return { success: true, serverRows: rowsToSave };
+        }
+      } else {
+        // saved ok and caller requested no refresh
+        setMessage("Saved");
+        setTimeout(() => setMessage(""), 2000);
+        return { success: true, serverRows: rowsToSave };
       }
     } catch (err) {
       console.error("Save error:", err);
       setMessage("Save failed");
-
-      // Basic rollback idea: you could reload server rows here to revert.
-      // For now we attempt to reload server rows so user isn't left in inconsistent state.
-      try {
-        const r3 = await fetch("/api/get-sheet");
-        const d3 = await r3.json();
-        setRows(d3.rows || []);
-      } catch (reloadErr) {
-        console.warn("Reload after save failure also failed:", reloadErr);
-      }
+      setTimeout(() => setMessage(""), 3000);
+      return { success: false, error: err };
     } finally {
       setSaving(false);
-      setTimeout(() => setMessage(""), 2500);
     }
   }
 
-  // Manual save button handler (uses same helper)
+  // Manual save button handler (refresh canonical copy)
   async function saveToGoogleSheet() {
-    await saveRowsToSheet(rows);
+    const result = await saveRowsToSheet(rows, { refresh: true });
+    if (!result.success) {
+      // keep current UI (or optionally reload server copy)
+      setMessage("Save failed");
+      setTimeout(() => setMessage(""), 3000);
+    }
   }
 
   async function handleRun() {
@@ -261,7 +302,7 @@ export default function EditorPage() {
                         <td className="px-4 py-3">
                           <div className="flex gap-2">
                             <button
-                              onClick={() => deleteRow(i)} // autosave by default
+                              onClick={() => deleteRow(i)}
                               className="px-3 py-1 bg-red-50 text-red-700 rounded hover:bg-red-100"
                               aria-label={`Delete row ${i + 1}`}
                             >
